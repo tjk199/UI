@@ -182,6 +182,7 @@ function onMessageReceived(data) {
 
     // 触发重新渲染
     renderUI();
+    renderFloatingUI();
 
     if (typeof toastr !== 'undefined') {
         toastr.success('UI 模板状态已更新', 'UI Template Manager');
@@ -201,6 +202,8 @@ function onCharacterChanged() {
     renderUI();
     renderTemplateList();
     renderBindingInfo();
+    renderFloatingUI();
+    injectTemplateStyles();
 }
 
 // -----------------------------------------------------------------------------
@@ -518,6 +521,279 @@ function buildExtensionPanel() {
 }
 
 // -----------------------------------------------------------------------------
+// 悬浮球：状态变量
+// -----------------------------------------------------------------------------
+let floatingBall = null;
+let floatingPanel = null;
+let isPanelOpen = false;
+let isDragging = false;
+let dragOffsetX = 0;
+let dragOffsetY = 0;
+let hasMoved = false;
+
+// -----------------------------------------------------------------------------
+// 创建悬浮球
+// -----------------------------------------------------------------------------
+function createFloatingBall() {
+    if (document.getElementById('ut-floating-ball')) return;
+
+    // 悬浮球
+    floatingBall = document.createElement('div');
+    floatingBall.id = 'ut-floating-ball';
+    floatingBall.className = 'ut-floating-ball';
+    floatingBall.title = 'UI Template Manager';
+    floatingBall.innerHTML = `<span class="ut-ball-icon">📋</span>`;
+    document.body.appendChild(floatingBall);
+
+    // 浮动面板
+    floatingPanel = document.createElement('div');
+    floatingPanel.id = 'ut-floating-panel';
+    floatingPanel.className = 'ut-floating-panel';
+    floatingPanel.innerHTML = `
+        <div class="ut-floating-header">
+            <span class="ut-floating-title">UI 模板</span>
+            <button class="ut-floating-close" id="ut-floating-close">×</button>
+        </div>
+        <div id="ui-template-manager-floating-panel" class="ut-floating-content">
+            <div class="ut-empty">加载中...</div>
+        </div>
+    `;
+    document.body.appendChild(floatingPanel);
+
+    // 关闭按钮
+    document.getElementById('ut-floating-close').addEventListener('click', (e) => {
+        e.stopPropagation();
+        closeFloatingPanel();
+    });
+
+    // 拖拽逻辑
+    floatingBall.addEventListener('mousedown', onDragStart);
+    floatingBall.addEventListener('touchstart', onDragStart, { passive: false });
+
+    // 点击展开/收起（区分点击和拖拽）
+    floatingBall.addEventListener('click', (e) => {
+        if (!hasMoved) {
+            toggleFloatingPanel();
+        }
+    });
+
+    // 从设置中恢复位置
+    const s = extension_settings[SETTINGS_KEY];
+    if (s.ballPosition) {
+        floatingBall.style.left = s.ballPosition.left + 'px';
+        floatingBall.style.top = s.ballPosition.top + 'px';
+    } else {
+        // 默认位置：右下角
+        floatingBall.style.right = '20px';
+        floatingBall.style.bottom = '100px';
+    }
+
+    // 注入模板自定义 CSS
+    injectTemplateStyles();
+}
+
+// -----------------------------------------------------------------------------
+// 拖拽开始
+// -----------------------------------------------------------------------------
+function onDragStart(e) {
+    isDragging = true;
+    hasMoved = false;
+
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+
+    const rect = floatingBall.getBoundingClientRect();
+    dragOffsetX = clientX - rect.left;
+    dragOffsetY = clientY - rect.top;
+
+    // 清除 right/bottom，改用 left/top
+    floatingBall.style.right = 'auto';
+    floatingBall.style.bottom = 'auto';
+
+    document.addEventListener('mousemove', onDragMove);
+    document.addEventListener('mouseup', onDragEnd);
+    document.addEventListener('touchmove', onDragMove, { passive: false });
+    document.addEventListener('touchend', onDragEnd);
+
+    e.preventDefault();
+}
+
+// -----------------------------------------------------------------------------
+// 拖拽移动
+// -----------------------------------------------------------------------------
+function onDragMove(e) {
+    if (!isDragging) return;
+
+    hasMoved = true;
+
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+
+    let left = clientX - dragOffsetX;
+    let top = clientY - dragOffsetY;
+
+    // 边界限制
+    const maxLeft = window.innerWidth - floatingBall.offsetWidth;
+    const maxTop = window.innerHeight - floatingBall.offsetHeight;
+    left = Math.max(0, Math.min(left, maxLeft));
+    top = Math.max(0, Math.min(top, maxTop));
+
+    floatingBall.style.left = left + 'px';
+    floatingBall.style.top = top + 'px';
+
+    // 如果面板已打开，同步更新面板位置
+    if (isPanelOpen) {
+        updatePanelPosition();
+    }
+
+    e.preventDefault();
+}
+
+// -----------------------------------------------------------------------------
+// 拖拽结束
+// -----------------------------------------------------------------------------
+function onDragEnd() {
+    isDragging = false;
+
+    document.removeEventListener('mousemove', onDragMove);
+    document.removeEventListener('mouseup', onDragEnd);
+    document.removeEventListener('touchmove', onDragMove);
+    document.removeEventListener('touchend', onDragEnd);
+
+    // 保存位置
+    const s = extension_settings[SETTINGS_KEY];
+    s.ballPosition = {
+        left: floatingBall.offsetLeft,
+        top: floatingBall.offsetTop,
+    };
+    saveSettingsDebounced();
+}
+
+// -----------------------------------------------------------------------------
+// 切换浮动面板显示/隐藏
+// -----------------------------------------------------------------------------
+function toggleFloatingPanel() {
+    if (isPanelOpen) {
+        closeFloatingPanel();
+    } else {
+        openFloatingPanel();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 打开浮动面板
+// -----------------------------------------------------------------------------
+function openFloatingPanel() {
+    isPanelOpen = true;
+    floatingPanel.classList.add('ut-floating-panel-open');
+    updatePanelPosition();
+    renderFloatingUI();
+}
+
+// -----------------------------------------------------------------------------
+// 关闭浮动面板
+// -----------------------------------------------------------------------------
+function closeFloatingPanel() {
+    isPanelOpen = false;
+    floatingPanel.classList.remove('ut-floating-panel-open');
+}
+
+// -----------------------------------------------------------------------------
+// 更新浮动面板位置（跟随悬浮球）
+// -----------------------------------------------------------------------------
+function updatePanelPosition() {
+    if (!floatingBall || !floatingPanel) return;
+
+    const ballRect = floatingBall.getBoundingClientRect();
+    const panelWidth = 320;
+    const panelHeight = 400;
+    const gap = 10;
+
+    // 优先显示在悬浮球左侧
+    let left = ballRect.left - panelWidth - gap;
+    let top = ballRect.top;
+
+    // 如果左侧空间不够，显示在右侧
+    if (left < 10) {
+        left = ballRect.right + gap;
+    }
+
+    // 垂直方向边界检查
+    if (top + panelHeight > window.innerHeight - 10) {
+        top = window.innerHeight - panelHeight - 10;
+    }
+    if (top < 10) {
+        top = 10;
+    }
+
+    floatingPanel.style.left = left + 'px';
+    floatingPanel.style.top = top + 'px';
+}
+
+// -----------------------------------------------------------------------------
+// 渲染浮动面板中的 UI 模板
+// -----------------------------------------------------------------------------
+function renderFloatingUI() {
+    const panel = document.getElementById('ui-template-manager-floating-panel');
+    if (!panel) return;
+
+    const template = getCurrentTemplate();
+    const s = extension_settings[SETTINGS_KEY];
+
+    if (!template) {
+        panel.innerHTML = `
+            <div class="ut-empty">
+                <p>当前角色未绑定 UI 模板。</p>
+                <p class="ut-hint">请在扩展设置中导入并绑定模板。</p>
+            </div>
+        `;
+        return;
+    }
+
+    const state = deepMerge(template.defaultState || {}, s.currentState || {});
+
+    try {
+        const renderedHtml = renderTemplateString(template.html, state);
+        panel.innerHTML = `<div class="ut-template-wrapper">${renderedHtml}</div>`;
+    } catch (err) {
+        console.error('[UI Template Manager] 浮动面板渲染失败:', err);
+        panel.innerHTML = `<div class="ut-error">模板渲染失败: ${err.message}</div>`;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 注入当前模板的自定义 CSS
+// -----------------------------------------------------------------------------
+function injectTemplateStyles() {
+    const template = getCurrentTemplate();
+    if (!template || !template.css) return;
+
+    let styleEl = document.getElementById('ut-template-dynamic-style');
+    if (!styleEl) {
+        styleEl = document.createElement('style');
+        styleEl.id = 'ut-template-dynamic-style';
+        document.head.appendChild(styleEl);
+    }
+
+    // 给模板 CSS 加上作用域前缀，避免影响全局
+    const scopedCss = template.css
+        .split('\n')
+        .map(line => {
+            // 简单地给每个选择器加上 .ut-template-wrapper 前缀
+            return line.replace(/^([^{]+)\{/g, (match, selector) => {
+                const scopedSelectors = selector
+                    .split(',')
+                    .map(s => '.ut-template-wrapper ' + s.trim())
+                    .join(', ');
+                return scopedSelectors + ' {';
+            });
+        })
+        .join('\n');
+
+    styleEl.textContent = scopedCss;
+}
+
+// -----------------------------------------------------------------------------
 // 入口：扩展加载
 // -----------------------------------------------------------------------------
 function init() {
@@ -526,10 +802,15 @@ function init() {
     // 构建 UI 面板
     buildExtensionPanel();
 
+    // 创建悬浮球
+    createFloatingBall();
+
     // 初始渲染
     renderTemplateList();
     renderBindingInfo();
     renderUI();
+    renderFloatingUI();
+    injectTemplateStyles();
 
     // 注册事件监听
     if (eventSource && eventSource.addEventListener) {
@@ -542,6 +823,13 @@ function init() {
         // 聊天切换 → 同上
         eventSource.on(event_types.CHAT_CHANGED, onCharacterChanged);
     }
+
+    // 窗口大小变化时重新定位面板
+    window.addEventListener('resize', () => {
+        if (isPanelOpen) {
+            updatePanelPosition();
+        }
+    });
 
     console.log('[UI Template Manager] 扩展已加载');
 }
@@ -561,4 +849,8 @@ window.UITemplateManager = {
     exportTemplate,
     bindTemplateToCurrentCharacter,
     getCurrentTemplate,
+    renderFloatingUI,
+    toggleFloatingPanel,
+    openFloatingPanel,
+    closeFloatingPanel,
 };
